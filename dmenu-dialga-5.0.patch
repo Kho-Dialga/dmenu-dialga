@@ -1,8 +1,11 @@
 diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/config.def.h dmenu-dialga/config.def.h
 --- dmenu-5.0.tar/dmenu-5.0/config.def.h	2020-09-02 10:37:07.000000000 -0600
-+++ dmenu-dialga/config.def.h	2021-04-29 16:48:03.909918225 -0600
-@@ -4,7 +4,8 @@
++++ dmenu-dialga/config.def.h	2021-06-04 18:41:46.947321220 -0600
+@@ -2,11 +2,22 @@
+ /* Default settings; can be overriden by command line. */
+ 
  static int topbar = 1;                      /* -b  option; if 0, dmenu appears at bottom     */
+++static double opacity = 1.0;                /* -o  option; defines alpha translucency        */
  /* -fn option overrides fonts[0]; default X11 font or font set */
  static const char *fonts[] = {
 -	"monospace:size=10"
@@ -10,8 +13,42 @@ diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/config.def.h dmenu-dialga/config
 +	"Noto Color Emoji:size=12"
  };
  static const char *prompt      = NULL;      /* -p  option; prompt to the left of input field */
++
++static const unsigned int baralpha = 0xd0;
++static const unsigned int borderalpha = OPAQUE;
++static const unsigned int alphas[][3]      = {
++	/*               fg      bg        border     */
++	[SchemeNorm] = { OPAQUE, baralpha, borderalpha },
++	[SchemeSel]  = { OPAQUE, baralpha, borderalpha },
++};
++
  static const char *colors[SchemeLast][2] = {
+ 	/*     fg         bg       */
+ 	[SchemeNorm] = { "#bbbbbb", "#222222" },
+Only in dmenu-dialga: config.def.h.orig
+Only in dmenu-dialga: config.def.h.rej
 Only in dmenu-dialga: config.h
+diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/config.mk dmenu-dialga/config.mk
+--- dmenu-5.0.tar/dmenu-5.0/config.mk	2020-09-02 10:37:07.000000000 -0600
++++ dmenu-dialga/config.mk	2021-06-04 18:35:42.303564165 -0600
+@@ -15,12 +15,16 @@ XINERAMAFLAGS = -DXINERAMA
+ # freetype
+ FREETYPELIBS = -lfontconfig -lXft
+ FREETYPEINC = /usr/include/freetype2
++
++# alpha
++XRENDERLIBS = -lXrender
++
+ # OpenBSD (uncomment)
+ #FREETYPEINC = $(X11INC)/freetype2
+ 
+ # includes and libs
+ INCS = -I$(X11INC) -I$(FREETYPEINC)
+-LIBS = -L$(X11LIB) -lX11 $(XINERAMALIBS) $(FREETYPELIBS)
++LIBS = -L$(X11LIB) -lX11 $(XINERAMALIBS) $(FREETYPELIBS) ${XRENDERLIBS}
+ 
+ # flags
+ CPPFLAGS = -D_DEFAULT_SOURCE -D_BSD_SOURCE -D_XOPEN_SOURCE=700 -D_POSIX_C_SOURCE=200809L -DVERSION=\"$(VERSION)\" $(XINERAMAFLAGS)
 Only in dmenu-dialga: dmenu
 diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/dmenu.1 dmenu-dialga/dmenu.1
 --- dmenu-5.0.tar/dmenu-5.0/dmenu.1	2020-09-02 10:37:07.000000000 -0600
@@ -35,9 +72,10 @@ diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/dmenu.1 dmenu-dialga/dmenu.1
  .BI \-l " lines"
  dmenu lists items vertically, with the given number of lines.
  .TP
+Only in dmenu-dialga: dmenu-alpha-4.9_20190303_190303.diff
 diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/dmenu.c dmenu-dialga/dmenu.c
 --- dmenu-5.0.tar/dmenu-5.0/dmenu.c	2020-09-02 10:37:07.000000000 -0600
-+++ dmenu-dialga/dmenu.c	2021-04-29 16:48:03.909918225 -0600
++++ dmenu-dialga/dmenu.c	2021-06-04 18:39:49.490726483 -0600
 @@ -15,6 +15,7 @@
  #include <X11/extensions/Xinerama.h>
  #endif
@@ -46,16 +84,18 @@ diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/dmenu.c dmenu-dialga/dmenu.c
  
  #include "drw.h"
  #include "util.h"
-@@ -24,6 +25,8 @@
+@@ -24,6 +25,10 @@
                               * MAX(0, MIN((y)+(h),(r).y_org+(r).height) - MAX((y),(r).y_org)))
  #define LENGTH(X)             (sizeof X / sizeof X[0])
  #define TEXTW(X)              (drw_fontset_getwidth(drw, (X)) + lrpad)
++#define OPAQUE                0xffU
++#define OPACITY               "_NET_WM_WINDOW_OPACITY"
 +#define NUMBERSMAXDIGITS      100
 +#define NUMBERSBUFSIZE        (NUMBERSMAXDIGITS * 2) + 1
  
  /* enums */
  enum { SchemeNorm, SchemeSel, SchemeOut, SchemeLast }; /* color schemes */
-@@ -34,10 +37,11 @@ struct item {
+@@ -34,10 +39,11 @@ struct item {
  	int out;
  };
  
@@ -68,7 +108,15 @@ diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/dmenu.c dmenu-dialga/dmenu.c
  static int lrpad; /* sum of left and right padding */
  static size_t cursor;
  static struct item *items = NULL;
-@@ -53,6 +57,10 @@ static XIC xic;
+@@ -50,9 +56,18 @@ static Display *dpy;
+ static Window root, parentwin, win;
+ static XIC xic;
+ 
++static int useargb = 0;
++static Visual *visual;
++static int depth;
++static Colormap cmap;
++
  static Drw *drw;
  static Clr *scheme[SchemeLast];
  
@@ -79,7 +127,7 @@ diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/dmenu.c dmenu-dialga/dmenu.c
  #include "config.h"
  
  static int (*fstrncmp)(const char *, const char *, size_t) = strncmp;
-@@ -127,11 +135,27 @@ drawitem(struct item *item, int x, int y
+@@ -127,11 +142,27 @@ drawitem(struct item *item, int x, int y
  }
  
  static void
@@ -107,7 +155,7 @@ diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/dmenu.c dmenu-dialga/dmenu.c
  
  	drw_setscheme(drw, scheme[SchemeNorm]);
  	drw_rect(drw, 0, 0, mw, mh, 1, 1);
-@@ -143,7 +167,12 @@ drawmenu(void)
+@@ -143,7 +174,12 @@ drawmenu(void)
  	/* draw input field */
  	w = (lines > 0 || !matches) ? mw - x : inputw;
  	drw_setscheme(drw, scheme[SchemeNorm]);
@@ -121,7 +169,7 @@ diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/dmenu.c dmenu-dialga/dmenu.c
  
  	curpos = TEXTW(text) - TEXTW(&text[cursor]);
  	if ((curpos += lrpad / 2 - 1) < w) {
-@@ -151,6 +180,7 @@ drawmenu(void)
+@@ -151,6 +187,7 @@ drawmenu(void)
  		drw_rect(drw, x + curpos, 2, 2, bh - 4, 1, 0);
  	}
  
@@ -129,7 +177,7 @@ diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/dmenu.c dmenu-dialga/dmenu.c
  	if (lines > 0) {
  		/* draw vertical list */
  		for (item = curr; item != next; item = item->right)
-@@ -165,13 +195,15 @@ drawmenu(void)
+@@ -165,13 +202,15 @@ drawmenu(void)
  		}
  		x += w;
  		for (item = curr; item != next; item = item->right)
@@ -147,7 +195,50 @@ diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/dmenu.c dmenu-dialga/dmenu.c
  	drw_map(drw, win, 0, 0, mw, mh);
  }
  
-@@ -525,6 +557,12 @@ readstdin(void)
+@@ -519,12 +558,55 @@ paste(void)
+ }
+ 
+ static void
++xinitvisual()
++{
++	XVisualInfo *infos;
++	XRenderPictFormat *fmt;
++	int nitems;
++	int i;
++
++	XVisualInfo tpl = {
++		.screen = screen,
++		.depth = 32,
++		.class = TrueColor
++	};
++	long masks = VisualScreenMask | VisualDepthMask | VisualClassMask;
++
++	infos = XGetVisualInfo(dpy, masks, &tpl, &nitems);
++	visual = NULL;
++	for(i = 0; i < nitems; i ++) {
++		fmt = XRenderFindVisualFormat(dpy, infos[i].visual);
++		if (fmt->type == PictTypeDirect && fmt->direct.alphaMask) {
++			visual = infos[i].visual;
++			depth = infos[i].depth;
++			cmap = XCreateColormap(dpy, root, visual, AllocNone);
++			useargb = 1;
++			break;
++		}
++	}
++
++	XFree(infos);
++
++	if (! visual) {
++		visual = DefaultVisual(dpy, screen);
++		depth = DefaultDepth(dpy, screen);
++		cmap = DefaultColormap(dpy, screen);
++	}
++}
++
++static void
+ readstdin(void)
+ {
+ 	char buf[sizeof text], *p;
  	size_t i, imax = 0, size = 0;
  	unsigned int tmpmax = 0;
  
@@ -160,14 +251,14 @@ diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/dmenu.c dmenu-dialga/dmenu.c
  	/* read each line from stdin and add it to the item list */
  	for (i = 0; fgets(buf, sizeof buf, stdin); i++) {
  		if (i + 1 >= size / sizeof *items)
-@@ -601,8 +639,13 @@ setup(void)
+@@ -601,8 +683,13 @@ setup(void)
  	int a, di, n, area = 0;
  #endif
  	/* init appearance */
 -	for (j = 0; j < SchemeLast; j++)
 -		scheme[j] = drw_scm_create(drw, colors[j], 2);
 +	for (j = 0; j < SchemeLast; j++) {
-+		scheme[j] = drw_scm_create(drw, (const char**)colors[j], 2);
++		scheme[j] = drw_scm_create(drw, (const char**)colors[j], alphas[j], 2);
 +	}
 +	for (j = 0; j < SchemeOut; ++j) {
 +		for (i = 0; i < 2; ++i)
@@ -176,13 +267,34 @@ diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/dmenu.c dmenu-dialga/dmenu.c
  
  	clip = XInternAtom(dpy, "CLIPBOARD",   False);
  	utf8 = XInternAtom(dpy, "UTF8_STRING", False);
-@@ -689,11 +732,46 @@ setup(void)
+@@ -657,14 +744,14 @@ setup(void)
+ 
+ 	/* create menu window */
+ 	swa.override_redirect = True;
+-	swa.background_pixel = scheme[SchemeNorm][ColBg].pixel;
++	swa.background_pixel = 0;
++	swa.colormap = cmap;
+ 	swa.event_mask = ExposureMask | KeyPressMask | VisibilityChangeMask;
+ 	win = XCreateWindow(dpy, parentwin, x, y, mw, mh, 0,
+-	                    CopyFromParent, CopyFromParent, CopyFromParent,
+-	                    CWOverrideRedirect | CWBackPixel | CWEventMask, &swa);
++	                    depth, InputOutput, visual,
++	                    CWOverrideRedirect|CWBackPixel|CWBorderPixel|CWColormap|CWEventMask, &swa);
+ 	XSetClassHint(dpy, win, &ch);
+ 
+-
+ 	/* input methods */
+ 	if ((xim = XOpenIM(dpy, NULL, NULL, NULL)) == NULL)
+ 		die("XOpenIM failed: could not open input device");
+@@ -689,11 +776,47 @@ setup(void)
  static void
  usage(void)
  {
 -	fputs("usage: dmenu [-bfiv] [-l lines] [-p prompt] [-fn font] [-m monitor]\n"
+-	      "             [-nb color] [-nf color] [-sb color] [-sf color] [-w windowid]\n", stderr);
 +	fputs("usage: dmenu [-bfiPv] [-l lines] [-p prompt] [-fn font] [-m monitor]\n"
- 	      "             [-nb color] [-nf color] [-sb color] [-sf color] [-w windowid]\n", stderr);
++        "             [-nb color] [-nf color] [-sb color] [-sf color] [-w windowid]\n"
+++	      "             [ -o opacity]\n", stderr);
  	exit(1);
  }
  
@@ -224,7 +336,7 @@ diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/dmenu.c dmenu-dialga/dmenu.c
  int
  main(int argc, char *argv[])
  {
-@@ -712,7 +790,9 @@ main(int argc, char *argv[])
+@@ -712,25 +835,29 @@ main(int argc, char *argv[])
  		else if (!strcmp(argv[i], "-i")) { /* case-insensitive item matching */
  			fstrncmp = strncasecmp;
  			fstrstr = cistrstr;
@@ -235,7 +347,11 @@ diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/dmenu.c dmenu-dialga/dmenu.c
  			usage();
  		/* these options take one argument */
  		else if (!strcmp(argv[i], "-l"))   /* number of lines in vertical list */
-@@ -722,15 +802,15 @@ main(int argc, char *argv[])
+ 			lines = atoi(argv[++i]);
+ 		else if (!strcmp(argv[i], "-m"))
+ 			mon = atoi(argv[++i]);
++		else if (!strcmp(argv[i], "-o"))  /* opacity */
++			opacity = atof(argv[++i]);
  		else if (!strcmp(argv[i], "-p"))   /* adds prompt to left of input field */
  			prompt = argv[++i];
  		else if (!strcmp(argv[i], "-fn"))  /* font or font set */
@@ -256,11 +372,14 @@ diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/dmenu.c dmenu-dialga/dmenu.c
  		else if (!strcmp(argv[i], "-w"))   /* embedding window id */
  			embed = argv[++i];
  		else
-@@ -748,8 +828,23 @@ main(int argc, char *argv[])
+@@ -747,9 +874,25 @@ main(int argc, char *argv[])
+ 	if (!XGetWindowAttributes(dpy, parentwin, &wa))
  		die("could not get embedding window attributes: 0x%lx",
  		    parentwin);
- 	drw = drw_create(dpy, screen, root, wa.width, wa.height);
+-	drw = drw_create(dpy, screen, root, wa.width, wa.height);
 -	if (!drw_fontset_create(drw, fonts, LENGTH(fonts)))
++  xinitvisual();
++	drw = drw_create(dpy, screen, root, wa.width, wa.height, visual, depth, cmap);
 +	readxresources();
 +	/* Now we check whether to override xresources with commandline parameters */
 +	if ( tempfonts )
@@ -281,11 +400,46 @@ diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/dmenu.c dmenu-dialga/dmenu.c
  	lrpad = drw->fonts->h;
  
  #ifdef __OpenBSD__
+Only in dmenu-dialga: dmenu.c.orig
+Only in dmenu-dialga: dmenu.c.rej
+Only in dmenu-dialga: dmenu-dialga-5.0.patch
 Only in dmenu-dialga: dmenu.o
 diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/drw.c dmenu-dialga/drw.c
 --- dmenu-5.0.tar/dmenu-5.0/drw.c	2020-09-02 10:37:07.000000000 -0600
-+++ dmenu-dialga/drw.c	2021-04-29 16:48:03.909918225 -0600
-@@ -133,19 +133,6 @@ xfont_create(Drw *drw, const char *fontn
++++ dmenu-dialga/drw.c	2021-06-04 18:35:42.304564162 -0600
+@@ -61,7 +61,7 @@ utf8decode(const char *c, long *u, size_
+ }
+ 
+ Drw *
+-drw_create(Display *dpy, int screen, Window root, unsigned int w, unsigned int h)
++drw_create(Display *dpy, int screen, Window root, unsigned int w, unsigned int h, Visual *visual, unsigned int depth, Colormap cmap)
+ {
+ 	Drw *drw = ecalloc(1, sizeof(Drw));
+ 
+@@ -70,8 +70,11 @@ drw_create(Display *dpy, int screen, Win
+ 	drw->root = root;
+ 	drw->w = w;
+ 	drw->h = h;
+-	drw->drawable = XCreatePixmap(dpy, root, w, h, DefaultDepth(dpy, screen));
+-	drw->gc = XCreateGC(dpy, root, 0, NULL);
++	drw->visual = visual;
++	drw->depth = depth;
++	drw->cmap = cmap;
++	drw->drawable = XCreatePixmap(dpy, root, w, h, depth);
++	drw->gc = XCreateGC(dpy, drw->drawable, 0, NULL);
+ 	XSetLineAttributes(dpy, drw->gc, 1, LineSolid, CapButt, JoinMiter);
+ 
+ 	return drw;
+@@ -87,7 +90,7 @@ drw_resize(Drw *drw, unsigned int w, uns
+ 	drw->h = h;
+ 	if (drw->drawable)
+ 		XFreePixmap(drw->dpy, drw->drawable);
+-	drw->drawable = XCreatePixmap(drw->dpy, drw->root, w, h, DefaultDepth(drw->dpy, drw->screen));
++	drw->drawable = XCreatePixmap(drw->dpy, drw->root, w, h, drw->depth);
+ }
+ 
+ void
+@@ -133,19 +136,6 @@ xfont_create(Drw *drw, const char *fontn
  		die("no font specified.");
  	}
  
@@ -305,6 +459,87 @@ diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/drw.c dmenu-dialga/drw.c
  	font = ecalloc(1, sizeof(Fnt));
  	font->xfont = xfont;
  	font->pattern = pattern;
+@@ -194,21 +184,22 @@ drw_fontset_free(Fnt *font)
+ }
+ 
+ void
+-drw_clr_create(Drw *drw, Clr *dest, const char *clrname)
++drw_clr_create(Drw *drw, Clr *dest, const char *clrname, unsigned int alpha)
+ {
+ 	if (!drw || !dest || !clrname)
+ 		return;
+ 
+-	if (!XftColorAllocName(drw->dpy, DefaultVisual(drw->dpy, drw->screen),
+-	                       DefaultColormap(drw->dpy, drw->screen),
++	if (!XftColorAllocName(drw->dpy, drw->visual, drw->cmap,
+ 	                       clrname, dest))
+ 		die("error, cannot allocate color '%s'", clrname);
++
++	dest->pixel = (dest->pixel & 0x00ffffffU) | (alpha << 24);
+ }
+ 
+ /* Wrapper to create color schemes. The caller has to call free(3) on the
+  * returned color scheme when done using it. */
+ Clr *
+-drw_scm_create(Drw *drw, const char *clrnames[], size_t clrcount)
++drw_scm_create(Drw *drw, const char *clrnames[], const unsigned int alphas[], size_t clrcount)
+ {
+ 	size_t i;
+ 	Clr *ret;
+@@ -218,7 +209,7 @@ drw_scm_create(Drw *drw, const char *clr
+ 		return NULL;
+ 
+ 	for (i = 0; i < clrcount; i++)
+-		drw_clr_create(drw, &ret[i], clrnames[i]);
++		drw_clr_create(drw, &ret[i], clrnames[i], alphas[i]);
+ 	return ret;
+ }
+ 
+@@ -274,9 +265,7 @@ drw_text(Drw *drw, int x, int y, unsigne
+ 	} else {
+ 		XSetForeground(drw->dpy, drw->gc, drw->scheme[invert ? ColFg : ColBg].pixel);
+ 		XFillRectangle(drw->dpy, drw->drawable, drw->gc, x, y, w, h);
+-		d = XftDrawCreate(drw->dpy, drw->drawable,
+-		                  DefaultVisual(drw->dpy, drw->screen),
+-		                  DefaultColormap(drw->dpy, drw->screen));
++		d = XftDrawCreate(drw->dpy, drw->drawable, drw->visual, drw->cmap);
+ 		x += lpad;
+ 		w -= lpad;
+ 	}
+Only in dmenu-dialga: drw.c.orig
+diff '--color=auto' -up dmenu-5.0.tar/dmenu-5.0/drw.h dmenu-dialga/drw.h
+--- dmenu-5.0.tar/dmenu-5.0/drw.h	2020-09-02 10:37:07.000000000 -0600
++++ dmenu-dialga/drw.h	2021-06-04 18:35:42.304564162 -0600
+@@ -20,6 +20,9 @@ typedef struct {
+ 	Display *dpy;
+ 	int screen;
+ 	Window root;
++	Visual *visual;
++	unsigned int depth;
++	Colormap cmap;
+ 	Drawable drawable;
+ 	GC gc;
+ 	Clr *scheme;
+@@ -27,7 +30,7 @@ typedef struct {
+ } Drw;
+ 
+ /* Drawable abstraction */
+-Drw *drw_create(Display *dpy, int screen, Window win, unsigned int w, unsigned int h);
++Drw *drw_create(Display *dpy, int screen, Window win, unsigned int w, unsigned int h, Visual *visual, unsigned int depth, Colormap cmap);
+ void drw_resize(Drw *drw, unsigned int w, unsigned int h);
+ void drw_free(Drw *drw);
+ 
+@@ -38,8 +41,8 @@ unsigned int drw_fontset_getwidth(Drw *d
+ void drw_font_getexts(Fnt *font, const char *text, unsigned int len, unsigned int *w, unsigned int *h);
+ 
+ /* Colorscheme abstraction */
+-void drw_clr_create(Drw *drw, Clr *dest, const char *clrname);
+-Clr *drw_scm_create(Drw *drw, const char *clrnames[], size_t clrcount);
++void drw_clr_create(Drw *drw, Clr *dest, const char *clrname, unsigned int alpha);
++Clr *drw_scm_create(Drw *drw, const char *clrnames[], const unsigned int alphas[], size_t clrcount);
+ 
+ /* Cursor abstraction */
+ Cur *drw_cur_create(Drw *drw, int shape);
 Only in dmenu-dialga: drw.o
 Only in dmenu-dialga: .git
 Only in dmenu-dialga: patches
